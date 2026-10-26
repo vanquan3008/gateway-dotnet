@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -10,6 +10,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: true
@@ -37,7 +41,7 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Restore dependencies
+      - name: Restore and audit dependencies
         run: dotnet restore Core.Gateway.sln
 
       - name: Verify format
@@ -52,3 +56,54 @@ jobs:
       - name: Smoke test development APIs and gateway
         shell: pwsh
         run: ./tests/smoke-development.ps1
+
+      - name: Publish
+        run: dotnet publish src/Core.Gateway.Api/Core.Gateway.Api.csproj --configuration Release --no-build --nologo --output artifacts/publish
+
+      - name: Validate Kubernetes manifests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          kubectl kustomize deploy/kubernetes | Out-Null
+
+      - name: Check deployment contracts
+        run: |
+          python -m pip install PyYAML==6.0.3
+          python tests/validate_manifests.py
+
+      - name: Build container image
+        run: docker build --pull --file Dockerfile --tag core-gateway:${{ github.sha }} .
+
+      - name: Smoke test production container
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'docker logs gateway-smoke; docker rm -f gateway-smoke >/dev/null' EXIT
+          docker run -d --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m --name gateway-smoke -p 127.0.0.1:18080:8080 \
+            -e ASPNETCORE_ENVIRONMENT=Production \
+            -e Authentication__Jwt__Authority=https://identity.example.com \
+            -e Authentication__Jwt__Audience=gateway-api \
+            -e GatewaySecurity__AllowedHosts__0=gateway.example.com \
+            -e GatewaySecurity__KnownProxies__0=127.0.0.1 \
+            -e GatewaySecurity__AllowedForwardedHosts__0=gateway.example.com \
+            -e Observability__OtlpExporterEnabled=false \
+            core-gateway:${{ github.sha }}
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent -H 'Host: gateway.example.com' http://127.0.0.1:18080/health/ready; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent -H 'Host: gateway.example.com' http://127.0.0.1:18080/health/live
+          curl --fail --silent -H 'Host: gateway.example.com' http://127.0.0.1:18080/health/ready
+          status=$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'Host: unexpected.example.com' http://127.0.0.1:18080/health/live)
+          test "$status" = 400
+
+      - name: Upload gateway artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-gateway
+          path: artifacts/publish
+          if-no-files-found: error
+          retention-days: 7

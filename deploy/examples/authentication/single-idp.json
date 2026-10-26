@@ -1,0 +1,12 @@
+{
+  "Authentication": {
+    "Enabled": true,
+    "Jwt": {
+      "Authority": "https://sso.example.com/realms/main",
+      "Audience": "gateway-api",
+      "RequireHttpsMetadata": true,
+      "ClockSkewSeconds": 30,
+      "BackchannelTimeoutMilliseconds": 5000
+    }
+  }
+}

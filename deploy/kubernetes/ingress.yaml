@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: core-gateway
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "40"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "40"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - gateway.example.com
+      secretName: core-gateway-tls
+  rules:
+    - host: gateway.example.com
+      http:
+        paths:
+          # One catch-all: routes live only in reverseproxy.json, so a new service needs no Ingress change.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: core-gateway
+                port:
+                  name: http

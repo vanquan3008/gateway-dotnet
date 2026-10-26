@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: core-gateway
+  labels:
+    app.kubernetes.io/name: core-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: core-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+      appProtocol: http

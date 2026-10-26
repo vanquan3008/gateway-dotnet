@@ -1,0 +1,32 @@
+{
+  "Authentication": {
+    "Enabled": true,
+    "Jwt": {
+      "Providers": {
+        "SSO": {
+          "Issuer": "https://sso.example.com/realms/main",
+          "Authority": "https://sso.example.com/realms/main",
+          "Audience": "gateway-api",
+          "ValidAlgorithms": [ "RS256" ],
+          "RoleClaimType": "roles"
+        },
+        "PartnerRsa": {
+          "Issuer": "https://partner-rsa.example.com",
+          "Audience": "gateway-api",
+          "PublicKeyFile": "/app/keys/partner-rsa.jwks",
+          "ValidAlgorithms": [ "RS256" ]
+        }
+      }
+    },
+    "ApiKeys": {
+      "Enabled": true,
+      "Clients": {
+        "billing-service": {
+          "KeyHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+          "Scopes": [ "orders.write" ],
+          "TenantId": "t1"
+        }
+      }
+    }
+  }
+}

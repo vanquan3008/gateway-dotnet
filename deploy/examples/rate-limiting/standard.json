@@ -1,0 +1,29 @@
+{
+  "RateLimiting": {
+    "Enabled": true,
+    "Local": {
+      "Enabled": true,
+      "Instance": { "PermitLimit": 1000, "WindowSeconds": 1 },
+      "Service": { "PermitLimit": 600, "WindowSeconds": 1 },
+      "Anonymous": { "PermitLimit": 300, "WindowSeconds": 60 },
+      "InstanceConcurrencyLimit": 1024,
+      "ServiceConcurrencyLimit": 256
+    },
+    "Distributed": {
+      "Enabled": true,
+      "Authenticated": { "PermitLimit": 300, "WindowSeconds": 60 },
+      "Anonymous": { "PermitLimit": 60, "WindowSeconds": 60 },
+      "Fallback": {
+        "UseLocalFallbackWhenStoreUnavailable": true,
+        "AutoScaleRatio": true,
+        "LocalRatio": 0.34,
+        "HeartbeatSeconds": 5
+      }
+    }
+  },
+  "Redis": {
+    "KeyPrefix": "core-gateway:production",
+    "TimeoutMilliseconds": 250,
+    "FailureCooldownSeconds": 5
+  }
+}

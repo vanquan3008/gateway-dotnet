@@ -1,0 +1,23 @@
+{
+  "RateLimiting": {
+    "Enabled": true,
+    "Distributed": {
+      "Enabled": true,
+      "UserIdClaim": "sub",
+      "TenantIdClaim": "tenant_id",
+      "ApiKeyIdClaim": "api_key_id",
+      "Authenticated": { "PermitLimit": 300, "WindowSeconds": 60 },
+      "Anonymous": { "PermitLimit": 60, "WindowSeconds": 60 },
+      "Tenant": { "PermitLimit": 3000, "WindowSeconds": 60 },
+      "ApiKey": { "PermitLimit": 1200, "WindowSeconds": 60 }
+    },
+    "Policies": {
+      "login": { "PermitLimit": 10, "WindowSeconds": 60, "Partition": "Ip" },
+      "export": { "PermitLimit": 5, "WindowSeconds": 3600, "Partition": "Tenant" },
+      "partner-write": { "PermitLimit": 100, "WindowSeconds": 60, "Partition": "ApiKey" }
+    }
+  },
+  "Redis": {
+    "KeyPrefix": "core-gateway:production"
+  }
+}

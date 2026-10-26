@@ -1,0 +1,178 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core-gateway
+  labels:
+    app.kubernetes.io/name: core-gateway
+spec:
+  # No replicas field: the HPA owns the pod count, and kubectl apply must not reset it mid-traffic.
+  minReadySeconds: 5
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: core-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: core-gateway
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 45
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: core-gateway
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: registry.example.com/core-gateway:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            # Probes only; the Service never exposes it, so the Ingress can forward "/" without publishing health.
+            - name: management
+              containerPort: 8081
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: core-gateway-settings
+            # Authentication__Jwt__Providers__<name>__Issuer / Audience / Authority | PublicKeyFile / ValidAlgorithms__0 ...
+            # (SSO, partner JWTs). See deploy/examples/secrets.example.yaml.
+            - secretRef:
+                name: core-gateway-jwt-providers
+                optional: true
+            # Authentication__ApiKeys__Enabled and Authentication__ApiKeys__Clients__<name>__KeyHash (SHA-256 only).
+            - secretRef:
+                name: core-gateway-api-keys
+                optional: true
+            # Authentication__Signature__Enabled and Authentication__Signature__Clients__<name>__PublicKeyFile=/app/keys/<file>.
+            - secretRef:
+                name: core-gateway-signature
+                optional: true
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: Production
+            - name: ASPNETCORE_HTTP_PORTS
+              value: "8080;8081"
+            - name: HealthChecks__ManagementPort
+              value: "8081"
+            - name: Gateway__RoutesFile
+              value: /app/config/reverseproxy.json
+            - name: Authentication__Jwt__Authority
+              valueFrom:
+                secretKeyRef:
+                  name: core-gateway-auth
+                  key: authority
+                  optional: true
+            - name: Authentication__Jwt__Audience
+              valueFrom:
+                secretKeyRef:
+                  name: core-gateway-auth
+                  key: audience
+                  optional: true
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: Redis__ConnectionString
+              valueFrom:
+                secretKeyRef:
+                  name: core-gateway-redis
+                  key: connection-string
+                  optional: true
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: service.instance.id=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 5
+          resources:
+            # Sized from tests/load: one guaranteed core (~1200 rps before collapse) backs the 1000/s
+            # local breaker; the 2-core limit absorbs bursts without CFS throttling the p99.
+            requests:
+              cpu: "1"
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: management
+              httpHeaders:
+                - name: Host
+                  value: gateway.example.com
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: management
+              httpHeaders:
+                - name: Host
+                  value: gateway.example.com
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: management
+              httpHeaders:
+                - name: Host
+                  value: gateway.example.com
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: routes
+              mountPath: /app/config
+              readOnly: true
+            # Public keys: JWT providers (Authentication__Jwt__Providers__<name>__PublicKeyFile) and signature clients
+            # (Authentication__Signature__Clients__<name>__PublicKeyFile), both as /app/keys/<file>.
+            - name: jwt-keys
+              mountPath: /app/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: routes
+          configMap:
+            name: core-gateway-routes
+        - name: jwt-keys
+          secret:
+            secretName: core-gateway-keys
+            optional: true
+            defaultMode: 0444
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

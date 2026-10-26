@@ -1,0 +1,158 @@
+# Alerts for Core.Gateway (Prometheus Operator / kube-prometheus-stack).
+# Series names come from the OTel Collector Prometheus exporter, checked against tests/load:
+# job = Observability:ServiceName ("Core.Gateway.Api"), instance = service.instance.id (pod name).
+# Thresholds follow the measured sizing in tests/load/results; unit tests: tests/observability/alerts.test.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: core-gateway
+  labels:
+    app.kubernetes.io/name: core-gateway
+spec:
+  groups:
+    - name: core-gateway.availability
+      rules:
+        - alert: GatewayTelemetryMissing
+          expr: absent(target_info{job="Core.Gateway.Api"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: No telemetry from any gateway pod for 5 minutes
+            description: Either every gateway pod is down or the OTLP export path (collector, network policy) is broken.
+            action: "If pods are running, check the export path (collector, Observability__OtlpEndpoint, egress NetworkPolicy). Other alerts cannot fire meanwhile; probe availability through the ingress."
+
+        - alert: GatewayHigh5xxRate
+          expr: |
+            sum(rate(http_server_request_duration_seconds_count{job="Core.Gateway.Api", http_route!~"/health/.*", http_response_status_code=~"5.."}[5m]))
+              /
+            sum(rate(http_server_request_duration_seconds_count{job="Core.Gateway.Api", http_route!~"/health/.*"}[5m]))
+              > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $value | humanizePercentage }} of gateway responses are 5xx"
+            description: Check gateway_proxy_errors_total by cluster to find the failing backend, then IdP (503 on auth) and Redis (503 when UseLocalFallbackWhenStoreUnavailable=false).
+            action: "One cluster dominating gateway_proxy_errors_total means that backend fails; do not restart the gateway. 503 without forwarding errors comes from the IdP (log 'Authentication metadata unavailable') or Redis with UseLocalFallbackWhenStoreUnavailable=false. 504 with rising p99 means the backend exceeds the timeout."
+
+        - alert: GatewayElevated5xxRate
+          expr: |
+            sum(rate(http_server_request_duration_seconds_count{job="Core.Gateway.Api", http_route!~"/health/.*", http_response_status_code=~"5.."}[5m]))
+              /
+            sum(rate(http_server_request_duration_seconds_count{job="Core.Gateway.Api", http_route!~"/health/.*"}[5m]))
+              > 0.01
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $value | humanizePercentage }} of gateway responses are 5xx"
+            action: "One cluster dominating gateway_proxy_errors_total means that backend fails; do not restart the gateway. 503 without forwarding errors comes from the IdP (log 'Authentication metadata unavailable') or Redis with UseLocalFallbackWhenStoreUnavailable=false. 504 with rising p99 means the backend exceeds the timeout."
+
+        - alert: GatewayBackendForwardingErrors
+          expr: sum by (cluster, error) (rate(gateway_proxy_errors_total{job="Core.Gateway.Api"}[5m])) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Gateway cannot forward to {{ $labels.cluster }} ({{ $labels.error }})"
+            description: More than 1 forwarding failure per second. RequestTimedOut means the backend is slow; Request/Connect errors mean it is unreachable.
+            action: "RequestTimedOut - check that backend's latency and saturation. Request/Connect - check its Service, endpoints, readiness and NetworkPolicy. The gateway does not retry; clients receive 502/504."
+
+        - alert: GatewayNotEnoughReadyPods
+          expr: kube_deployment_status_replicas_available{deployment="core-gateway"} < 2
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Fewer than 2 gateway pods are available
+            description: Below the PodDisruptionBudget; one more failure takes the gateway down.
+            action: "Run kubectl describe deployment/core-gateway and read events - image pull, OOMKilled, probe failures (Host header) or nodes without the 1-core CPU request."
+
+    - name: core-gateway.capacity
+      rules:
+        - alert: GatewayHighLatencyP99
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le) (rate(http_server_request_duration_seconds_bucket{job="Core.Gateway.Api", http_route!~"/health/.*"}[5m]))
+            ) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Gateway p99 latency is {{ $value | humanizeDuration }}"
+            description: Includes backend time. Compare with http_client_request_duration_seconds to see whether the gateway or a backend is slow.
+            action: "Gateway p99 close to backend p99 means the backend is slow. Gateway p99 well above it means pods lack CPU (CFS throttling, thread pool queue); add replicas or raise maxReplicas."
+
+        - alert: GatewaySheddingLoad
+          expr: |
+            sum(rate(aspnetcore_rate_limiting_requests_total{job="Core.Gateway.Api", aspnetcore_rate_limiting_result!="acquired"}[5m]))
+              /
+            sum(rate(aspnetcore_rate_limiting_requests_total{job="Core.Gateway.Api"}[5m]))
+              > 0.01
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pods reject {{ $value | humanizePercentage }} of requests with 429 (local breaker)"
+            description: Traffic grows faster than the HPA adds pods, the HPA is at maxReplicas, or the local limits are below what the pods can serve.
+            action: "Usually clears once the HPA adds pods; at maxReplicas see GatewayAtMaxReplicas. 429 at low CPU means local limits sit below node capacity - re-measure with tests/load/run-capacity.ps1 and update RateLimiting__Local__*. Never disable the limiter."
+
+        - alert: GatewayConcurrencyRejections
+          expr: sum by (cluster) (rate(gateway_concurrency_rejected_total{job="Core.Gateway.Api"}[5m])) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Concurrency bulkhead is rejecting requests for {{ $labels.cluster }}"
+            description: Requests to this cluster are piling up in flight, usually because the backend got slow.
+            action: "A cluster bulkhead is full, almost always because that backend slowed down. Fix the backend; raise ServiceConcurrencyLimit only if its normal latency is genuinely higher."
+
+        - alert: GatewayAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="core-gateway"}
+              >=
+            kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler="core-gateway"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The gateway HPA has been at maxReplicas for 15 minutes
+            description: The gateway cannot scale further; expect load shedding if traffic keeps growing.
+            action: "Look for abnormal traffic (bots, client retry storms) in requests/s and 429s. If the traffic is real, raise maxReplicas and make sure the cluster has CPU for new pods."
+
+        - alert: GatewayMemoryNearLimit
+          # 85% of the 512Mi container limit.
+          expr: max by (instance) (dotnet_process_memory_working_set_bytes{job="Core.Gateway.Api"}) > 456340275
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Gateway pod {{ $labels.instance }} uses {{ $value | humanize1024 }}B of its 512Mi limit"
+            action: "Memory grows with queued requests under overload; compare with latency and in-flight. Steady growth at stable traffic is a leak - set DOTNET_EnableDiagnostics=1 on one pod and take a dotnet-gcdump."
+
+    - name: core-gateway.dependencies
+      rules:
+        - alert: GatewaySharedQuotaFailOpen
+          expr: sum(rate(gateway_ratelimit_distributed_fail_open_total{job="Core.Gateway.Api"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Redis is unavailable; shared quotas are degraded to a reduced per-pod local budget (local fallback)
+            action: "Restore Redis. Each pod enforces 1/(live pods) of every quota meanwhile (Fallback:AutoScaleRatio, using the last pod count it saw; Fallback:LocalRatio until pods are counted) - see gateway_ratelimit_local_fallback_total and gateway_ratelimit_instances_active; shared quotas resume automatically within seconds of recovery, no restart needed."
+
+        - alert: GatewayFallbackPodCountStale
+          # The local fallback splits every quota by the pod count it last read from Redis.
+          expr: |
+            abs(
+              max(gateway_ratelimit_instances_active{job="Core.Gateway.Api"})
+                -
+              max(kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="core-gateway"})
+            ) >= 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: The pod count used by the rate limit fallback differs from the HPA replica count
+            action: "Pod heartbeats are failing or Redis was down while the HPA scaled (see gateway_ratelimit_instances_heartbeat_failed_total). Until the counts agree, a Redis outage would split quotas across the wrong number of pods."

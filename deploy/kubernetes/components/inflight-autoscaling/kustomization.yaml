@@ -1,0 +1,35 @@
+# Opt-in second HPA signal: average in-flight requests per pod. When backends slow down, requests pile up
+# while CPU stays low, so CPU alone never adds pods and the per-pod bulkheads start returning 429.
+#
+# Enable it only together with a custom metrics adapter, otherwise the HPA cannot read the metric and
+# stops scaling down. Requirements:
+# 1. OTel Collector prometheus exporter: resource_to_telemetry_conversion: { enabled: true }
+#    (adds k8s_namespace_name / k8s_pod_name from OTEL_RESOURCE_ATTRIBUTES in the Deployment).
+# 2. prometheus-adapter rule:
+#      - seriesQuery: 'gateway_concurrency_active{k8s_namespace_name!="",k8s_pod_name!=""}'
+#        resources:
+#          overrides:
+#            k8s_namespace_name: { resource: namespace }
+#            k8s_pod_name: { resource: pod }
+#        name: { as: gateway_inflight_requests }
+#        metricsQuery: 'sum(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+#
+# 300 is ~30% of RateLimiting:Local:InstanceConcurrencyLimit (1024): pods are added well before the bulkhead.
+# Use it from an overlay:  components: [../base/components/inflight-autoscaling]
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: core-gateway
+    patch: |-
+      - op: add
+        path: /spec/metrics/-
+        value:
+          type: Pods
+          pods:
+            metric:
+              name: gateway_inflight_requests
+            target:
+              type: AverageValue
+              averageValue: "300"

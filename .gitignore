@@ -41,3 +41,7 @@ Desktop.ini
 *.bak
 *.swp
 ~$*
+
+# Load test generated material and raw results
+tests/load/.generated/
+tests/load/results/raw/

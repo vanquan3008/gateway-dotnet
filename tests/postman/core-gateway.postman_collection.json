@@ -880,7 +880,7 @@
                 "users"
               ]
             },
-            "description": "Mặc định chỉ gửi một request. Đặt biến burstMax (ví dụ 700) để request này tự lặp lại cho tới khi gặp 429 rồi chuyển sang request \"Sau khi chờ Retry-After\".\n- Quota chung cho khách ẩn danh: 60 request/phút/IP (cần Redis).\n- Trần cục bộ cho khách ẩn danh: 500 request/phút/IP trên mỗi pod (appsettings.json)\nỞ Development không có Redis nên chỉ gặp trần cục bộ: burstMax = 700 là đủ. Sau khi chạy, đợi hết cửa sổ (1 phút) trước khi chạy lại."
+            "description": "Mặc định chỉ gửi một request. Đặt biến burstMax (ví dụ 700) để request này tự lặp lại cho tới khi gặp 429 rồi chuyển sang request \"Sau khi chờ Retry-After\".\n- Quota chung cho khách ẩn danh: 60 request/phút/IP (cần Redis).\n- Trần cục bộ cho khách ẩn danh: 500 request/phút/IP trên mỗi pod (appsettings.json), 300 trong manifest Kubernetes.\nỞ Development không có Redis nên chỉ gặp trần cục bộ: burstMax = 700 là đủ. Sau khi chạy, đợi hết cửa sổ (1 phút) trước khi chạy lại."
           },
           "response": []
         },
