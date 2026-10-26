@@ -1,0 +1,104 @@
+{
+  "ReverseProxy": {
+    "Routes": {
+      "user-route": {
+        "ClusterId": "user-cluster",
+        "TimeoutPolicy": "api",
+        "Match": {
+          "Path": "/api/users/{**catch-all}"
+        }
+      },
+      "user-legacy-route": {
+        "ClusterId": "user-cluster",
+        "TimeoutPolicy": "api",
+        "Match": {
+          "Path": "/users/{**catch-all}"
+        },
+        "Transforms": [
+          {
+            "PathRemovePrefix": "/users"
+          },
+          {
+            "PathPrefix": "/api/users"
+          }
+        ]
+      },
+      "order-route": {
+        "ClusterId": "order-cluster",
+        "TimeoutPolicy": "api",
+        "Match": {
+          "Path": "/api/orders/{**catch-all}"
+        }
+      },
+      "order-legacy-route": {
+        "ClusterId": "order-cluster",
+        "TimeoutPolicy": "api",
+        "Match": {
+          "Path": "/orders/{**catch-all}"
+        },
+        "Transforms": [
+          {
+            "PathRemovePrefix": "/orders"
+          },
+          {
+            "PathPrefix": "/api/orders"
+          }
+        ]
+      },
+      "product-route": {
+        "ClusterId": "product-cluster",
+        "TimeoutPolicy": "api",
+        "Match": {
+          "Path": "/api/products/{**catch-all}"
+        }
+      },
+      "product-legacy-route": {
+        "ClusterId": "product-cluster",
+        "TimeoutPolicy": "api",
+        "Match": {
+          "Path": "/products/{**catch-all}"
+        },
+        "Transforms": [
+          {
+            "PathRemovePrefix": "/products"
+          },
+          {
+            "PathPrefix": "/api/products"
+          }
+        ]
+      }
+    },
+    "Clusters": {
+      "user-cluster": {
+        "HttpRequest": {
+          "ActivityTimeout": "00:00:20"
+        },
+        "Destinations": {
+          "user-api": {
+            "Address": "http://localhost:5001/"
+          }
+        }
+      },
+      "order-cluster": {
+        "HttpRequest": {
+          "ActivityTimeout": "00:00:20"
+        },
+        "Destinations": {
+          "order-api": {
+            "Address": "http://localhost:5002/"
+          }
+        }
+      },
+      "product-cluster": {
+        "HttpRequest": {
+          "ActivityTimeout": "00:00:20"
+        },
+        "Destinations": {
+          "product-api": {
+            "Address": "http://localhost:5003/"
+          }
+        }
+      }
+    }
+  }
+}
