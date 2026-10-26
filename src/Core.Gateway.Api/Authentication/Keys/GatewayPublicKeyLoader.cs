@@ -175,7 +175,8 @@ internal static class GatewayPublicKeyLoader
     {
         return rsa.KeySize < MinimumRsaKeySize
             ? throw new InvalidDataException($"RSA public keys must be at least {MinimumRsaKeySize} bits.")
-            : new RsaSecurityKey(rsa.ExportParameters(false)) {
+            : new RsaSecurityKey(rsa.ExportParameters(false))
+            {
                 KeyId = keyId
             };
     }
