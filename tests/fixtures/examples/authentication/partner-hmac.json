@@ -1,0 +1,15 @@
+{
+  "Authentication": {
+    "Enabled": true,
+    "Jwt": {
+      "Providers": {
+        "PartnerHmac": {
+          "Issuer": "https://partner-hmac.example.com",
+          "Audience": "gateway-api",
+          "SigningKey": "replace-with-a-random-secret-of-at-least-32-bytes",
+          "ValidAlgorithms": [ "HS256" ]
+        }
+      }
+    }
+  }
+}

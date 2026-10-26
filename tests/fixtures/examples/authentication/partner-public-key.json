@@ -1,0 +1,27 @@
+{
+  "Authentication": {
+    "Enabled": true,
+    "Jwt": {
+      "Providers": {
+        "PartnerRsa": {
+          "Issuer": "https://partner-rsa.example.com",
+          "Audience": "gateway-api",
+          "PublicKeyFile": "/app/keys/partner-rsa.jwks",
+          "ValidAlgorithms": [ "RS256" ]
+        },
+        "PartnerEc": {
+          "Issuer": "https://partner-ec.example.com",
+          "Audience": "gateway-api",
+          "PublicKeyFile": "/app/keys/partner-ec.pem",
+          "ValidAlgorithms": [ "ES256" ]
+        },
+        "PartnerCertificate": {
+          "Issuer": "https://partner-cert.example.com",
+          "Audience": "gateway-api",
+          "PublicKeyFile": "/app/keys/partner-cert.pem",
+          "ValidAlgorithms": [ "PS256" ]
+        }
+      }
+    }
+  }
+}

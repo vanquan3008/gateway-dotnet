@@ -1,0 +1,17 @@
+{
+  "Authentication": {
+    "Enabled": true,
+    "Jwt": {
+      "Providers": {
+        "SSO": {
+          "Issuer": "https://sso.example.com/realms/main",
+          "Authority": "https://sso.example.com/realms/main",
+          "Audience": "gateway-api",
+          "ValidAlgorithms": [ "RS256" ],
+          "NameClaimType": "sub",
+          "RoleClaimType": "roles"
+        }
+      }
+    }
+  }
+}

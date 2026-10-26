@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Core.Gateway.Api.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Update="Configuration\reverseproxy*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

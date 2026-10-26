@@ -1,0 +1,30 @@
+{
+  "Authentication": {
+    "Enabled": true,
+    "Signature": {
+      "Enabled": true,
+      "ClientIdHeader": "X-Client-Id",
+      "SignatureHeader": "X-Signature",
+      "TimestampHeader": "X-Timestamp",
+      "MaxClockSkewSeconds": 300,
+      "MaxBodyBytes": 131072,
+      "RejectReplays": true,
+      "Algorithm": "RS256",
+      "Clients": {
+        "partner-a": {
+          "PublicKeyFile": "/app/keys/partner-a.pem",
+          "Scopes": [ "orders.read", "orders.write" ],
+          "Roles": [ "partner" ],
+          "TenantId": "t1"
+        },
+        "partner-b": {
+          "PublicKeyFile": "/app/keys/partner-b.jwks"
+        },
+        "retired-partner": {
+          "Enabled": false,
+          "PublicKeyFile": "/app/keys/retired-partner.pem"
+        }
+      }
+    }
+  }
+}
