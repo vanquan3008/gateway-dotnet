@@ -1,0 +1,141 @@
+# promtool unit tests for deploy/observability/prometheus-rules.yaml (run: python tests/validate_alerts.py).
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: 5xx ratio ignores health probes and pages above 5%
+    interval: 1m
+    input_series:
+      - series: 'target_info{job="Core.Gateway.Api"}'
+        values: '1x30'
+      - series: 'http_server_request_duration_seconds_count{job="Core.Gateway.Api",http_route="/api/users/{**catch-all}",http_response_status_code="200"}'
+        values: '0+900x30'
+      - series: 'http_server_request_duration_seconds_count{job="Core.Gateway.Api",http_route="/api/users/{**catch-all}",http_response_status_code="502"}'
+        values: '0+100x30'
+      - series: 'http_server_request_duration_seconds_count{job="Core.Gateway.Api",http_route="/health/ready",http_response_status_code="503"}'
+        values: '0+5000x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: GatewayHigh5xxRate
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: GatewayHigh5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 10% of gateway responses are 5xx
+              description: Check gateway_proxy_errors_total by cluster to find the failing backend, then IdP (503 on auth) and Redis (503 when UseLocalFallbackWhenStoreUnavailable=false).
+              action: "One cluster dominating gateway_proxy_errors_total means that backend fails; do not restart the gateway. 503 without forwarding errors comes from the IdP (log 'Authentication metadata unavailable') or Redis with UseLocalFallbackWhenStoreUnavailable=false. 504 with rising p99 means the backend exceeds the timeout."
+      - eval_time: 15m
+        alertname: GatewayTelemetryMissing
+        exp_alerts: []
+
+  - name: healthy traffic raises nothing
+    interval: 1m
+    input_series:
+      - series: 'target_info{job="Core.Gateway.Api"}'
+        values: '1x30'
+      - series: 'http_server_request_duration_seconds_count{job="Core.Gateway.Api",http_route="/api/orders/{**catch-all}",http_response_status_code="200"}'
+        values: '0+1000x30'
+      - series: 'aspnetcore_rate_limiting_requests_total{job="Core.Gateway.Api",aspnetcore_rate_limiting_result="acquired"}'
+        values: '0+1000x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GatewayHigh5xxRate
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatewayElevated5xxRate
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatewaySheddingLoad
+        exp_alerts: []
+
+  - name: missing telemetry pages
+    interval: 1m
+    input_series:
+      - series: 'up{job="something-else"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: GatewayTelemetryMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: Core.Gateway.Api
+            exp_annotations:
+              summary: No telemetry from any gateway pod for 5 minutes
+              description: Either every gateway pod is down or the OTLP export path (collector, network policy) is broken.
+              action: "If pods are running, check the export path (collector, Observability__OtlpEndpoint, egress NetworkPolicy). Other alerts cannot fire meanwhile; probe availability through the ingress."
+
+  - name: local breaker shedding above 1% warns
+    interval: 1m
+    input_series:
+      - series: 'aspnetcore_rate_limiting_requests_total{job="Core.Gateway.Api",aspnetcore_rate_limiting_result="acquired"}'
+        values: '0+950x20'
+      - series: 'aspnetcore_rate_limiting_requests_total{job="Core.Gateway.Api",aspnetcore_rate_limiting_result="global_limiter"}'
+        values: '0+50x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatewaySheddingLoad
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Pods reject 5% of requests with 429 (local breaker)
+              description: Traffic grows faster than the HPA adds pods, the HPA is at maxReplicas, or the local limits are below what the pods can serve.
+              action: "Usually clears once the HPA adds pods; at maxReplicas see GatewayAtMaxReplicas. 429 at low CPU means local limits sit below node capacity - re-measure with tests/load/run-capacity.ps1 and update RateLimiting__Local__*. Never disable the limiter."
+
+  - name: forwarding errors are reported per cluster
+    interval: 1m
+    input_series:
+      - series: 'gateway_proxy_errors_total{job="Core.Gateway.Api",cluster="order-cluster",error="RequestTimedOut"}'
+        values: '0+180x20'
+      - series: 'gateway_proxy_errors_total{job="Core.Gateway.Api",cluster="user-cluster",error="Request"}'
+        values: '0+6x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatewayBackendForwardingErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cluster: order-cluster
+              error: RequestTimedOut
+            exp_annotations:
+              summary: Gateway cannot forward to order-cluster (RequestTimedOut)
+              description: More than 1 forwarding failure per second. RequestTimedOut means the backend is slow; Request/Connect errors mean it is unreachable.
+              action: "RequestTimedOut - check that backend's latency and saturation. Request/Connect - check its Service, endpoints, readiness and NetworkPolicy. The gateway does not retry; clients receive 502/504."
+
+  - name: Redis fail-open warns
+    interval: 1m
+    input_series:
+      - series: 'gateway_ratelimit_distributed_fail_open_total{job="Core.Gateway.Api",partition_type="user"}'
+        values: '0+30x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatewaySharedQuotaFailOpen
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: Redis is unavailable; shared quotas are degraded to a reduced per-pod local budget (local fallback)
+              action: "Restore Redis. Each pod enforces 1/(live pods) of every quota meanwhile (Fallback:AutoScaleRatio, using the last pod count it saw; Fallback:LocalRatio until pods are counted) - see gateway_ratelimit_local_fallback_total and gateway_ratelimit_instances_active; shared quotas resume automatically within seconds of recovery, no restart needed."
+
+  - name: Fallback pod count diverging from the HPA warns
+    interval: 1m
+    input_series:
+      - series: 'gateway_ratelimit_instances_active{job="Core.Gateway.Api",instance="pod-a"}'
+        values: '3x20'
+      - series: 'kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="core-gateway"}'
+        values: '8x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GatewayFallbackPodCountStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: The pod count used by the rate limit fallback differs from the HPA replica count
+              action: "Pod heartbeats are failing or Redis was down while the HPA scaled (see gateway_ratelimit_instances_heartbeat_failed_total). Until the counts agree, a Redis outage would split quotas across the wrong number of pods."
