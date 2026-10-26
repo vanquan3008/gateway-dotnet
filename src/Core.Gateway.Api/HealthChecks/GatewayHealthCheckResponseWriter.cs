@@ -7,6 +7,12 @@ public static class GatewayHealthCheckResponseWriter
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    /// <summary>
+    /// Writes the health report as JSON.
+    /// </summary>
+    /// <param name="context">The current request.</param>
+    /// <param name="report">The health report.</param>
+    /// <returns>A task that completes when the body was written.</returns>
     public static Task WriteAsync(HttpContext context, HealthReport report)
     {
         context.Response.ContentType = "application/json";

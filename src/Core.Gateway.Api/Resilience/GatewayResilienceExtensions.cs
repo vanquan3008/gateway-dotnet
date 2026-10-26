@@ -9,6 +9,12 @@ public static class GatewayResilienceExtensions
 {
     public const string ApiTimeoutPolicyName = "api";
 
+    /// <summary>
+    /// Registers request timeouts and passive health options.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configuration">The application configuration.</param>
+    /// <returns>The same service collection.</returns>
     public static IServiceCollection AddGatewayResilience(
         this IServiceCollection services,
         IConfiguration configuration)
@@ -20,8 +26,10 @@ public static class GatewayResilienceExtensions
             .Bind(section)
             .ValidateDataAnnotations()
             .Validate(
-                _ => !section.GetSection("BackendHealthWindowSeconds").Exists(),
-                "Legacy Resilience:BackendHealthWindowSeconds must be replaced by BackendHealthDetectionWindowSeconds and BackendHealthReactivationSeconds.")
+                options => options.TimeoutPolicies.All(pair =>
+                    !string.Equals(pair.Key, ApiTimeoutPolicyName, StringComparison.OrdinalIgnoreCase) &&
+                    pair.Value is >= 1 and <= 3_600),
+                "Resilience:TimeoutPolicies must use names other than 'api' and 1-3600 seconds.")
             .ValidateOnStart();
 
         services.AddRequestTimeouts();
@@ -30,7 +38,11 @@ public static class GatewayResilienceExtensions
             {
                 var timeout = TimeSpan.FromSeconds(resilience.Value.RequestTimeoutSeconds);
                 timeouts.AddPolicy(ApiTimeoutPolicyName, timeout);
-                // Routes that omit TimeoutPolicy still get a bounded lifetime.
+                foreach (var (name, seconds) in resilience.Value.TimeoutPolicies)
+                {
+                    timeouts.AddPolicy(name, TimeSpan.FromSeconds(seconds));
+                }
+
                 timeouts.DefaultPolicy = new RequestTimeoutPolicy { Timeout = timeout };
             });
 

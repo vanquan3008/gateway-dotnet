@@ -13,4 +13,7 @@ public sealed class GatewayHealthCheckOptions
     [Required]
     [RegularExpression("^/.*", ErrorMessage = "ReadinessPath must start with '/'.")]
     public string ReadinessPath { get; init; } = "/health/ready";
+
+    [Range(1, 65_535)]
+    public int? ManagementPort { get; init; }
 }

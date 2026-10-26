@@ -4,7 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using Core.Gateway.Api.Transformations;
+using Core.Gateway.Api.Headers;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -36,6 +36,7 @@ public sealed partial class GatewayPipelineTests
         request.Content = new StringContent("request-body");
         request.Headers.Add(GatewayHeaders.UserId, "forged-user");
         request.Headers.Add(GatewayHeaders.TenantId, "forged-tenant");
+        request.Headers.Add(GatewayHeaders.AuthIssuer, "https://forged.test");
         request.Headers.Add(GatewayHeaders.MerchantId, "forged-merchant");
         request.Headers.Add(GatewayHeaders.CorrelationId, "request-123");
 
@@ -47,7 +48,9 @@ public sealed partial class GatewayPipelineTests
         Assert.Equal("POST", echo.Method);
         Assert.Equal("request-body", echo.Body);
         Assert.Equal(request.Headers.Authorization!.ToString(), echo.Authorization);
-        Assert.Equal("", echo.UserId);
+
+        Assert.Equal("user-a", echo.UserId);
+        Assert.Equal("https://identity.test", echo.AuthIssuer);
         Assert.Equal("", echo.TenantId);
         Assert.Equal("", echo.MerchantId);
         Assert.Equal("request-123", echo.CorrelationId);
@@ -209,7 +212,7 @@ public sealed partial class GatewayPipelineTests
         using var cancellation = new CancellationTokenSource();
         using var request = host.AuthenticatedRequest(HttpMethod.Post, "/api/users/slow");
         var pending = host.Client.SendAsync(request, cancellation.Token);
-        // The backend has received the operation; cancellation must never cause a replay.
+
         await WaitUntilAsync(() => host.DownstreamRequests == 1);
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
@@ -219,8 +222,15 @@ public sealed partial class GatewayPipelineTests
         Assert.Equal(HttpStatusCode.OK, recovered.StatusCode);
     }
 
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        while (!condition()) await Task.Delay(20, cancellation.Token);
+    }
+
     private sealed record ProxyEcho(string Path, string Query, string Method, string Body, string Authorization,
-        string UserId, string TenantId, string MerchantId, string CorrelationId, string ForwardedFor);
+        string UserId, string TenantId, string MerchantId, string CorrelationId, string ForwardedFor,
+        string AuthIssuer = "", string ApiKey = "", string Signature = "");
 
     private sealed class GatewayTestHost : IAsyncDisposable
     {
@@ -247,7 +257,9 @@ public sealed partial class GatewayPipelineTests
 
         public static async Task<GatewayTestHost> StartAsync(Dictionary<string, string?>? overrides = null,
             Action<JwtBearerOptions, SecurityKey>? configureAuthentication = null,
-            Action<WebApplicationBuilder>? configureGateway = null)
+            Action<WebApplicationBuilder>? configureGateway = null,
+            string authenticationScheme = JwtBearerDefaults.AuthenticationScheme,
+            Dictionary<string, TokenValidationParameters>? backendProviders = null)
         {
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
@@ -257,13 +269,16 @@ public sealed partial class GatewayPipelineTests
             {
                 Interlocked.Increment(ref host._downstreamRequests);
                 var token = context.Request.Headers.Authorization.ToString();
-                new JwtSecurityTokenHandler().ValidateToken(token["Bearer ".Length..], new TokenValidationParameters
-                {
-                    ValidIssuer = Issuer,
-                    ValidAudience = Audience,
-                    IssuerSigningKey = host.BackendSigningKey,
-                    ClockSkew = TimeSpan.Zero
-                }, out _);
+                var handler = new JwtSecurityTokenHandler();
+                var rawToken = token.Length > "Bearer ".Length ? token["Bearer ".Length..] : null;
+                if (rawToken is not null) handler.ValidateToken(rawToken, backendProviders is not null
+                    ? backendProviders[handler.ReadJwtToken(rawToken).Issuer] : new TokenValidationParameters
+                    {
+                        ValidIssuer = Issuer,
+                        ValidAudience = Audience,
+                        IssuerSigningKey = host.BackendSigningKey,
+                        ClockSkew = TimeSpan.Zero
+                    }, out _);
                 if (context.Request.Path.Value!.EndsWith("/blocked", StringComparison.Ordinal))
                 {
                     host.Entered.TrySetResult();
@@ -292,13 +307,16 @@ public sealed partial class GatewayPipelineTests
                     context.Request.Headers[GatewayHeaders.TenantId].ToString(),
                     context.Request.Headers[GatewayHeaders.MerchantId].ToString(),
                     context.Request.Headers[GatewayHeaders.CorrelationId].ToString(),
-                    context.Request.Headers["X-Forwarded-For"].ToString()));
+                    context.Request.Headers["X-Forwarded-For"].ToString(),
+                    context.Request.Headers[GatewayHeaders.AuthIssuer].ToString(),
+                    context.Request.Headers["X-Api-Key"].ToString(),
+                    context.Request.Headers["X-Signature"].ToString()));
             });
             try
             {
                 await downstream.StartAsync();
                 host._gateway = CreateGateway(downstream.Urls.Single(), new RsaSecurityKey(host._rsa) { KeyId = "test-key" },
-                    overrides, configureAuthentication, configureGateway);
+                    overrides, configureAuthentication, configureGateway, authenticationScheme);
                 await host._gateway.StartAsync();
                 host.Client = host._gateway.GetTestClient();
                 host.Client.BaseAddress = new Uri("http://gateway.test");
@@ -312,17 +330,20 @@ public sealed partial class GatewayPipelineTests
         }
 
         public HttpRequestMessage AuthenticatedRequest(HttpMethod method, string path, string userId = "user-a",
-            string? tenantId = null, string? apiKeyId = null)
+            string? tenantId = null, string? apiKeyId = null, IEnumerable<Claim>? claims = null)
         {
             var request = new HttpRequestMessage(method, path);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", CreateToken(userId: userId, tenantId: tenantId, apiKeyId: apiKeyId));
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer",
+                CreateToken(userId: userId, tenantId: tenantId, apiKeyId: apiKeyId, extraClaims: claims));
             return request;
         }
 
-        public string CreateToken(string? failure = null, string userId = "user-a", string? tenantId = null, string? apiKeyId = null)
+        public string CreateToken(string? failure = null, string userId = "user-a", string? tenantId = null, string? apiKeyId = null,
+            IEnumerable<Claim>? extraClaims = null)
         {
             using var wrongKey = failure is "signature" or "rotation" ? RSA.Create(2048) : null;
             var claims = new List<Claim> { new("sub", userId) };
+            claims.AddRange(extraClaims ?? []);
             if (tenantId is not null) claims.Add(new Claim("tenant_id", tenantId));
             if (apiKeyId is not null) claims.Add(new Claim("api_key_id", apiKeyId));
             var token = new JwtSecurityToken(
@@ -352,16 +373,17 @@ public sealed partial class GatewayPipelineTests
         }
 
         private static WebApplication CreateGateway(string destination, SecurityKey key, Dictionary<string, string?>? overrides,
-            Action<JwtBearerOptions, SecurityKey>? configureAuthentication, Action<WebApplicationBuilder>? configureGateway)
+            Action<JwtBearerOptions, SecurityKey>? configureAuthentication, Action<WebApplicationBuilder>? configureGateway,
+            string authenticationScheme)
         {
             var values = new Dictionary<string, string?>
             {
                 ["environment"] = "Production",
                 ["contentRoot"] = AppContext.BaseDirectory,
                 ["Authentication:Enabled"] = "true",
-                ["Authentication:Authority"] = Issuer,
-                ["Authentication:Audience"] = Audience,
-                ["Authentication:ClockSkewSeconds"] = "0",
+                ["Authentication:Jwt:Authority"] = Issuer,
+                ["Authentication:Jwt:Audience"] = Audience,
+                ["Authentication:Jwt:ClockSkewSeconds"] = "0",
                 ["GatewaySecurity:AllowedHosts:0"] = "gateway.test",
                 ["GatewaySecurity:KnownProxies:0"] = "127.0.0.1",
                 ["GatewaySecurity:AllowedForwardedHosts:0"] = "gateway.test",
@@ -379,11 +401,10 @@ public sealed partial class GatewayPipelineTests
                 values[pair.Key] = pair.Value;
             }
 
-            // Exercise the entry point's configuration precedence and pipeline using native TestServer.
             return Program.CreateApplication(values.Select(pair => $"--{pair.Key}={pair.Value}").ToArray(), builder =>
             {
                 builder.WebHost.UseTestServer();
-                builder.Services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
+                builder.Services.PostConfigure<JwtBearerOptions>(authenticationScheme, options =>
                 {
                     options.Configuration = new OpenIdConnectConfiguration { Issuer = Issuer };
                     options.Configuration.SigningKeys.Add(key);
@@ -403,6 +424,8 @@ public sealed partial class GatewayPipelineTests
                 {
                     context.Connection.RemoteIpAddress = IPAddress.Parse(
                         context.Request.Headers["X-Test-Remote-IP"].FirstOrDefault() ?? "203.0.113.10");
+                    if (int.TryParse(context.Request.Headers["X-Test-Local-Port"].FirstOrDefault(), out var localPort))
+                        context.Connection.LocalPort = localPort;
                     return continuation(context);
                 });
                 next(app);
