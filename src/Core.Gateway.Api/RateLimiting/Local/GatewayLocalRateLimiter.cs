@@ -1,55 +1,142 @@
 using System.Threading.RateLimiting;
-using Core.Gateway.Api.RateLimiting.Options;
 using Core.Gateway.Api.RateLimiting.Shared;
 using Yarp.ReverseProxy.Model;
+using static Core.Gateway.Api.RateLimiting.Shared.GatewayRateLimitingNames;
 
 namespace Core.Gateway.Api.RateLimiting.Local;
 
 internal static class GatewayLocalRateLimiter
 {
-    public static PartitionedRateLimiter<HttpContext> Create(LocalRateLimitingOptions settings)
+    /// <summary>
+    /// Per-pod request-rate limiter: fixed-window limits per backend cluster and per pod, both must pass.
+    /// </summary>
+    /// <param name="settings">The instance and service quotas.</param>
+    /// <returns>The global limiter.</returns>
+    /// <exception cref="ArgumentNullException">settings is null.</exception>
+    public static PartitionedRateLimiter<HttpContext> Create(
+        LocalRateLimitingOptions settings)
     {
-        var instanceRateLimiter = PartitionedRateLimiter.Create<HttpContext, string>(_ =>
-            CreateFixedWindowPartition("instance", settings.Instance));
-        var anonymousRateLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-            settings.Anonymous is { } limit && context.User.Identity?.IsAuthenticated != true
-                ? CreateFixedWindowPartition(GatewayRateLimitPartition.ForAnonymous(context, limit).Key, limit)
-                : RateLimitPartition.GetNoLimiter("none"));
-        var serviceRateLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-            CreateFixedWindowPartition(GetServiceKey(context), settings.Service));
-        // Reject an IP or service before spending the shared pod rate budget.
+        ArgumentNullException.ThrowIfNull(settings);
+        PartitionedRateLimiter<HttpContext> serviceRateLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
+                context =>
+                {
+                    string serviceKey = GetServiceKey(context);
+                    return CreateFixedWindowPartition(
+                        serviceKey,
+                        settings.Service);
+                });
+
+        PartitionedRateLimiter<HttpContext> instanceRateLimiter =
+            PartitionedRateLimiter.Create<HttpContext, string>(
+                _ =>
+                {
+                    string instanceKey = LocalPartition.Instance;
+
+                    return CreateFixedWindowPartition(
+                        instanceKey,
+                        settings.Instance);
+                });
+
         return PartitionedRateLimiter.CreateChained(
-            anonymousRateLimiter,
             serviceRateLimiter,
             instanceRateLimiter);
     }
 
-    public static PartitionedRateLimiter<HttpContext> CreateConcurrencyLimiter(LocalRateLimitingOptions settings)
+    /// <summary>
+    /// Per-pod in-flight limiter per backend cluster and per pod, with no queue.
+    /// </summary>
+    /// <param name="settings">The concurrency limits.</param>
+    /// <returns>The concurrency limiter.</returns>
+    /// <exception cref="ArgumentNullException">settings is null.</exception>
+    public static PartitionedRateLimiter<HttpContext> CreateConcurrencyLimiter(
+        LocalRateLimitingOptions settings)
     {
-        var service = PartitionedRateLimiter.Create<HttpContext, string>(context =>
-            CreateConcurrencyPartition(GetServiceKey(context), settings.ServiceConcurrencyLimit));
-        var instance = PartitionedRateLimiter.Create<HttpContext, string>(_ =>
-            CreateConcurrencyPartition("instance", settings.InstanceConcurrencyLimit));
+        ArgumentNullException.ThrowIfNull(settings);
+        PartitionedRateLimiter<HttpContext> serviceConcurrencyLimiter = PartitionedRateLimiter.Create<HttpContext, string>(
+                context =>
+                {
+                    string serviceKey = GetServiceKey(context);
+                    return CreateConcurrencyPartition(
+                        serviceKey,
+                        settings.ServiceConcurrencyLimit);
+                });
 
-        return PartitionedRateLimiter.CreateChained(service, instance);
+        PartitionedRateLimiter<HttpContext> instanceConcurrencyLimiter =
+            PartitionedRateLimiter.Create<HttpContext, string>(
+                _ =>
+                {
+                    string instanceKey = LocalPartition.Instance;
+                    return CreateConcurrencyPartition(
+                        instanceKey,
+                        settings.InstanceConcurrencyLimit);
+                });
+
+        return PartitionedRateLimiter.CreateChained(
+            serviceConcurrencyLimiter,
+            instanceConcurrencyLimiter);
     }
 
-    internal static string GetServiceKey(HttpContext context) =>
-        context.GetEndpoint()?.Metadata.GetMetadata<RouteModel>()?.Config.ClusterId ?? "unmatched";
+    /// <summary>
+    /// Backend cluster id of the request, or "unmatched" when no route matched.
+    /// </summary>
+    /// <param name="context">The current request.</param>
+    /// <returns>The cluster id.</returns>
+    /// <exception cref="ArgumentNullException">context is null.</exception>
+    internal static string GetServiceKey(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
 
-    private static RateLimitPartition<string> CreateConcurrencyPartition(string key, int permitLimit) =>
-        RateLimitPartition.GetConcurrencyLimiter(key, _ => new ConcurrencyLimiterOptions
-        {
-            PermitLimit = permitLimit,
-            QueueLimit = 0
-        });
+        RouteModel? routeModel = context.GetEndpoint()?
+            .Metadata
+            .GetMetadata<RouteModel>();
 
-    private static RateLimitPartition<string> CreateFixedWindowPartition(string partitionKey, FixedWindowLimit limit) =>
-        RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+        string? clusterId = routeModel?.Config.ClusterId;
+
+        if (string.IsNullOrWhiteSpace(clusterId))
         {
-            AutoReplenishment = true,
-            PermitLimit = limit.PermitLimit,
-            QueueLimit = limit.QueueLimit,
-            Window = limit.Window
-        });
+            return LocalPartition.UnmatchedCluster;
+        }
+
+        return clusterId;
+    }
+
+    /// <summary>
+    /// A fixed window partition for a key.
+    /// </summary>
+    /// <param name="partitionKey">The key.</param>
+    /// <param name="limit">The quota.</param>
+    /// <returns>The partition.</returns>
+    private static RateLimitPartition<string> CreateFixedWindowPartition(
+        string partitionKey,
+        QuotaLimit limit)
+    {
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey,
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = limit.PermitLimit,
+                QueueLimit = limit.QueueLimit,
+                Window = limit.Window,
+                AutoReplenishment = true
+            });
+    }
+
+    /// <summary>
+    /// A concurrency partition for a key, with no queue.
+    /// </summary>
+    /// <param name="partitionKey">The key.</param>
+    /// <param name="permitLimit">Requests allowed at once.</param>
+    /// <returns>The partition.</returns>
+    private static RateLimitPartition<string> CreateConcurrencyPartition(
+        string partitionKey,
+        int permitLimit)
+    {
+        return RateLimitPartition.GetConcurrencyLimiter(
+            partitionKey,
+            _ => new ConcurrencyLimiterOptions
+            {
+                PermitLimit = permitLimit,
+                QueueLimit = 0
+            });
+    }
 }

@@ -1,7 +1,8 @@
-namespace Core.Gateway.Api.RateLimiting.Distributed.Interfaces;
+namespace Core.Gateway.Api.RateLimiting.Distributed.Store.Interfaces;
 
 public interface IDistributedRateLimitStore
 {
+    bool IsConfigured { get; }
     ValueTask<DistributedRateLimitResult> AcquireAsync(
         string partitionKey,
         int permitLimit,

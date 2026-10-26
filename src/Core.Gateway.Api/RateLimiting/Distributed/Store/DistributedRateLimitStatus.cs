@@ -1,4 +1,4 @@
-namespace Core.Gateway.Api.RateLimiting.Distributed;
+namespace Core.Gateway.Api.RateLimiting.Distributed.Store;
 
 public enum DistributedRateLimitStatus
 {

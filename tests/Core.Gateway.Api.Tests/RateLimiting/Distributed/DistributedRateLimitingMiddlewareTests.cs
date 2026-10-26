@@ -3,8 +3,9 @@ using System.Net;
 using System.Security.Claims;
 using Core.Gateway.Api.RateLimiting;
 using Core.Gateway.Api.RateLimiting.Distributed;
-using Core.Gateway.Api.RateLimiting.Distributed.Interfaces;
-using Core.Gateway.Api.RateLimiting.Options;
+using Core.Gateway.Api.RateLimiting.Distributed.Store;
+using Core.Gateway.Api.RateLimiting.Distributed.Store.Interfaces;
+using Core.Gateway.Api.RateLimiting.Shared;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Configuration;
@@ -53,18 +54,18 @@ public sealed class DistributedRateLimitingMiddlewareTests
     }
 
     [Fact]
-    public async Task PartialRedisFailure_BypassesUnavailableQuotaWithoutCreatingLocalTenantBudgetAndEmitsBoundedMetrics()
+    public async Task PartialRedisFailure_EnforcesHalfTheTenantQuotaLocallyAndEmitsBoundedMetrics()
     {
         var measurements = new List<(string Name, string? Type)>();
         using var listener = new MeterListener();
         listener.InstrumentPublished = (instrument, current) =>
         {
-            if (instrument.Meter.Name == DistributedRateLimitingMiddleware.MeterName)
+            if (instrument.Meter.Name == GatewayRateLimitingMetrics.MeterName)
                 current.EnableMeasurementEvents(instrument);
         };
         listener.SetMeasurementEventCallback<long>((instrument, _, tags, _) =>
         {
-            Assert.Equal(1, tags.Length);
+            Assert.InRange(tags.Length, 1, 2);
             Assert.Equal("partition.type", tags[0].Key);
             measurements.Add((instrument.Name, tags[0].Value?.ToString()));
         });
@@ -72,7 +73,6 @@ public sealed class DistributedRateLimitingMiddlewareTests
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["RateLimiting:Distributed:Enabled"] = "true",
-            ["RateLimiting:Distributed:RedisConnectionString"] = "localhost:6379",
             ["RateLimiting:Distributed:Authenticated:PermitLimit"] = "1",
             ["RateLimiting:Distributed:Tenant:PermitLimit"] = "2"
         }).Build();
@@ -89,6 +89,7 @@ public sealed class DistributedRateLimitingMiddlewareTests
         {
             var context = new DefaultHttpContext
             {
+                RequestServices = provider,
                 User = new ClaimsPrincipal(new ClaimsIdentity([new Claim("sub", "user-a"), new Claim("tenant_id", "tenant-a")], "test"))
             };
             context.Connection.RemoteIpAddress = IPAddress.Loopback;
@@ -96,25 +97,73 @@ public sealed class DistributedRateLimitingMiddlewareTests
             Assert.True(lease.IsAcquired);
             await middleware.InvokeAsync(context, store);
         }
-        // A tenant limit of two must never become a per-pod fallback counter.
-        Assert.Equal(3, reached);
+
+        Assert.Equal(1, reached);
         Assert.Equal(3, measurements.Count(m => m == ("gateway.ratelimit.distributed.allowed", "user")));
         Assert.Equal(3, measurements.Count(m => m == ("gateway.ratelimit.redis.unavailable", "tenant")));
-        Assert.Equal(3, measurements.Count(m => m == ("gateway.ratelimit.distributed.bypassed", "tenant")));
-        Assert.DoesNotContain(measurements, m => m.Name == "gateway.ratelimit.local.fallback");
+        Assert.Equal(3, measurements.Count(m => m == ("gateway.ratelimit.distributed.fail_open", "tenant")));
+        Assert.Equal(3, measurements.Count(m => m == ("gateway.ratelimit.local.fallback", "tenant")));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task WithoutRedis_EnforcesTheFullQuotaLocallyRegardlessOfFailOpen(bool failOpen)
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["RateLimiting:Distributed:Enabled"] = "true",
+            ["RateLimiting:Distributed:Authenticated:PermitLimit"] = "2",
+            ["RateLimiting:Distributed:Fallback:UseLocalFallbackWhenStoreUnavailable"] = failOpen.ToString()
+        }).Build();
+        using var provider = new ServiceCollection().AddLogging().AddGatewayRateLimiting(configuration).BuildServiceProvider();
+        var reached = 0;
+        var middleware = new DistributedRateLimitingMiddleware(_ =>
+        {
+            reached++;
+            return Task.CompletedTask;
+        }, provider.GetRequiredService<IOptions<GatewayRateLimitingOptions>>());
+        var store = new UnconfiguredStore();
+        var statusCodes = new List<int>();
+        for (var i = 0; i < 3; i++)
+        {
+            var context = new DefaultHttpContext
+            {
+                RequestServices = provider,
+                User = new ClaimsPrincipal(new ClaimsIdentity([new Claim("sub", "user-a")], "test"))
+            };
+            await middleware.InvokeAsync(context, store);
+            statusCodes.Add(context.Response.StatusCode);
+        }
+
+        Assert.Equal(2, reached);
+        Assert.Equal(429, statusCodes[2]);
+    }
+
+    private sealed class UnconfiguredStore : IDistributedRateLimitStore
+    {
+        public bool IsConfigured => false;
+
+        public ValueTask<DistributedRateLimitResult> AcquireAsync(string partitionKey, int permitLimit,
+            TimeSpan window, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(DistributedRateLimitResult.Unavailable());
     }
 
     private sealed class PartiallyUnavailableStore : IDistributedRateLimitStore
     {
+        public bool IsConfigured => true;
+
         public ValueTask<DistributedRateLimitResult> AcquireAsync(string partitionKey, int permitLimit,
             TimeSpan window, CancellationToken cancellationToken) =>
             ValueTask.FromResult(partitionKey.StartsWith("user:", StringComparison.Ordinal)
                 ? DistributedRateLimitResult.Allowed(window)
-                : DistributedRateLimitResult.Unavailable);
+                : DistributedRateLimitResult.Unavailable());
     }
 
     private sealed class ApiKeyQuotaStore : IDistributedRateLimitStore
     {
+        public bool IsConfigured => true;
+
         public List<string> Keys { get; } = [];
 
         public ValueTask<DistributedRateLimitResult> AcquireAsync(string partitionKey, int permitLimit,

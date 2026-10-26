@@ -1,6 +1,9 @@
 using System.ComponentModel.DataAnnotations;
+using Core.Gateway.Api.RateLimiting.Distributed;
+using Core.Gateway.Api.RateLimiting.Local;
+using Core.Gateway.Api.RateLimiting.Routes;
 
-namespace Core.Gateway.Api.RateLimiting.Options;
+namespace Core.Gateway.Api.RateLimiting;
 
 public sealed class GatewayRateLimitingOptions
 {
@@ -13,5 +16,7 @@ public sealed class GatewayRateLimitingOptions
 
     [Required]
     public DistributedRateLimitingOptions Distributed { get; init; } = new();
+
+    public Dictionary<string, RouteRateLimitPolicyOptions> Policies { get; init; } = [];
 }
 

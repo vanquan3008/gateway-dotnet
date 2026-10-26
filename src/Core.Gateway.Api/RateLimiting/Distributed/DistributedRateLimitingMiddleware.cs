@@ -1,20 +1,30 @@
 using System.Diagnostics;
-using Core.Gateway.Api.RateLimiting.Distributed.Interfaces;
-using Core.Gateway.Api.RateLimiting.Options;
+using Core.Gateway.Api.RateLimiting.Distributed;
+using Core.Gateway.Api.RateLimiting.Distributed.Fallback;
+using Core.Gateway.Api.RateLimiting.Distributed.Store;
+using Core.Gateway.Api.RateLimiting.Distributed.Store.Interfaces;
 using Core.Gateway.Api.RateLimiting.Shared;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 
 namespace Core.Gateway.Api.RateLimiting.Distributed;
 
+/// <summary>
+/// Applies the shared Redis quotas per client, tenant and API key.
+/// </summary>
 public sealed class DistributedRateLimitingMiddleware(
     RequestDelegate next, IOptions<GatewayRateLimitingOptions> options)
 {
-    public const string MeterName = DistributedRateLimitingMetrics.MeterName;
     private readonly GatewayRateLimitingOptions _settings = options.Value;
+    /// <summary>
+    /// Applies the shared Redis quotas in order: client (user or IP), tenant, API key. The first rejection ends the request with 429.
+    /// </summary>
+    /// <param name="context">The current request.</param>
+    /// <param name="store">The shared quota store.</param>
+    /// <returns>A task that completes when the request was forwarded or rejected.</returns>
     public async Task InvokeAsync(HttpContext context, IDistributedRateLimitStore store)
     {
-        if (ShouldSkipDistributedQuota(context))
+        if (!_settings.Enabled || !_settings.Distributed.Enabled || context.GetEndpoint()?.Metadata.GetMetadata<DisableRateLimitingAttribute>() is not null)
         {
             await next(context);
             return;
@@ -35,13 +45,14 @@ public sealed class DistributedRateLimitingMiddleware(
         await next(context);
     }
 
-    private bool ShouldSkipDistributedQuota(HttpContext context)
-    {
-        return !_settings.Enabled
-            || !_settings.Distributed.Enabled
-            || context.GetEndpoint()?.Metadata.GetMetadata<DisableRateLimitingAttribute>() is not null;
-    }
-
+    /// <summary>
+    /// Takes one permit from one quota: continues if allowed, 429 if rejected, local fallback or 503 if Redis is down.
+    /// </summary>
+    /// <param name="context">The current request.</param>
+    /// <param name="store">The shared quota store.</param>
+    /// <param name="partition">The quota to consume.</param>
+    /// <returns>True when the request may continue; false when a response was already written.</returns>
+    /// <exception cref="InvalidOperationException">The store returned an unknown status.</exception>
     private async Task<bool> AcquireQuotaAsync(HttpContext context, IDistributedRateLimitStore store,
         GatewayRateLimitPartition partition)
     {
@@ -49,8 +60,10 @@ public sealed class DistributedRateLimitingMiddleware(
         var result = await store.AcquireAsync(partition.Key, partition.Limit.PermitLimit,
             partition.Limit.Window, context.RequestAborted);
 
-        DistributedRateLimitingMetrics.RecordAcquisition(partition.Type, result.Status,
-            Stopwatch.GetElapsedTime(started), _settings.Distributed.FailOpen);
+        GatewayRateLimitingMetrics.RecordAcquisition(partition.Type, result.Status,
+            Stopwatch.GetElapsedTime(started), _settings.Distributed.Fallback.UseLocalFallbackWhenStoreUnavailable);
+
+        GatewayRateLimitHeaders.Observe(context, result);
 
         switch (result.Status)
         {
@@ -62,12 +75,19 @@ public sealed class DistributedRateLimitingMiddleware(
                 return false;
 
             case DistributedRateLimitStatus.Unavailable:
-                if (_settings.Distributed.FailOpen)
+                var fallbackResult = context.RequestServices.GetRequiredService<LocalFallbackQuota>()
+                    .Resolve(partition, store.IsConfigured, result.RetryAfter);
+                if (fallbackResult.Status == DistributedRateLimitStatus.Unavailable)
                 {
-                    return true;
+                    await GatewayRateLimitResponse.WriteStoreUnavailableAsync(context, fallbackResult.RetryAfter);
+                    return false;
                 }
 
-                await GatewayRateLimitResponse.WriteStoreUnavailableAsync(context);
+                GatewayRateLimitingMetrics.RecordLocalFallback(partition.Type, fallbackResult.Status);
+                if (fallbackResult.Status != DistributedRateLimitStatus.Rejected)
+                    return true;
+
+                await GatewayRateLimitResponse.WriteQuotaExceededAsync(context, fallbackResult.RetryAfter);
                 return false;
 
             default:

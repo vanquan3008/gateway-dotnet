@@ -1,0 +1,16 @@
+{
+  "RateLimiting": {
+    "Enabled": true,
+    "Local": {
+      "Enabled": true,
+      "Instance": { "PermitLimit": 200, "WindowSeconds": 1 },
+      "Service": { "PermitLimit": 100, "WindowSeconds": 1 },
+      "Anonymous": { "PermitLimit": 120, "WindowSeconds": 60 },
+      "InstanceConcurrencyLimit": 256,
+      "ServiceConcurrencyLimit": 64
+    },
+    "Distributed": {
+      "Enabled": false
+    }
+  }
+}
