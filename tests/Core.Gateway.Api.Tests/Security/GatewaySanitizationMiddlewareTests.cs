@@ -67,6 +67,9 @@ public sealed class GatewaySanitizationMiddlewareTests
     [InlineData("/api/../etc/passwd", "")]
     [InlineData("/api/..\\windows\\win.ini", "")]
     [InlineData("/api/files", "?file=%2e%2e/secret")]
+    [InlineData("/api/files/..%2Fadmin", "")]
+    [InlineData("/api/files/..%5Cadmin", "")]
+    [InlineData("/api/files/%252e%252e%252fadmin", "")]
     public async Task PathTraversal_IsBlocked(string path, string query)
     {
         var context = new DefaultHttpContext();

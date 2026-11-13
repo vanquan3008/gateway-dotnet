@@ -39,6 +39,7 @@ public static class GatewayObservabilityExtensions
             .AddOpenTelemetry()
             .ConfigureResource(resource => resource.AddService(settings.ServiceName))
             .WithTracing(tracing => tracing
+                .SetSampler(new ParentBasedSampler(new TraceIdRatioBasedSampler(settings.TraceSamplingRatio)))
                 .AddAspNetCoreInstrumentation()
                 .AddHttpClientInstrumentation());
 

@@ -1,22 +1,34 @@
-
 using System.Threading.RateLimiting;
+using Core.Gateway.Api.Authentication;
+using Core.Gateway.Api.Authentication.ApiKey;
+using Core.Gateway.Api.Authentication.Signature;
 using Core.Gateway.Api.RateLimiting.Shared;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
+using Microsoft.Net.Http.Headers;
 
 namespace Core.Gateway.Api.RateLimiting.Local;
 
 internal sealed class GatewayAnonymousRateLimitingMiddleware
     : IMiddleware, IDisposable
 {
+    private static readonly object CountedKey = new();
     private readonly PartitionedRateLimiter<HttpContext>? _limiter;
     private readonly TimeSpan _window;
+    private readonly string[] _credentialHeaders = [];
+
     /// <summary>
     /// Builds the per-IP limiter when Local:Anonymous is configured.
     /// </summary>
     /// <param name="options">The rate limiting options.</param>
+    /// <param name="authentication">Authentication switch.</param>
+    /// <param name="apiKeys">API key settings.</param>
+    /// <param name="signature">Signature settings.</param>
     public GatewayAnonymousRateLimitingMiddleware(
-        IOptions<GatewayRateLimitingOptions> options)
+        IOptions<GatewayRateLimitingOptions> options,
+        IOptions<GatewayAuthenticationOptions> authentication,
+        IOptions<GatewayApiKeyOptions> apiKeys,
+        IOptions<GatewaySignatureOptions> signature)
     {
         var settings = options.Value;
 
@@ -24,6 +36,22 @@ internal sealed class GatewayAnonymousRateLimitingMiddleware
         {
             _limiter = null;
             return;
+        }
+
+        if (authentication.Value.Enabled)
+        {
+            List<string> headers = [HeaderNames.Authorization];
+            if (apiKeys.Value.Enabled)
+            {
+                headers.Add(apiKeys.Value.HeaderName);
+            }
+
+            if (signature.Value.Enabled)
+            {
+                headers.Add(signature.Value.SignatureHeader);
+            }
+
+            _credentialHeaders = [.. headers];
         }
 
         var anonymousLimit = settings.Local.Anonymous;
@@ -40,32 +68,54 @@ internal sealed class GatewayAnonymousRateLimitingMiddleware
     }
 
     /// <summary>
-    /// Per-pod cap per IP for unauthenticated requests, applied before Redis to absorb floods.
+    /// Per-IP check before the cluster limiter, for requests without credentials.
     /// </summary>
     /// <param name="context">The current request.</param>
     /// <param name="next">The rest of the pipeline.</param>
     /// <returns>A task that completes when the request was forwarded or rejected with 429.</returns>
-    public async Task InvokeAsync(
+    public Task InvokeBeforeAuthenticationAsync(HttpContext context, RequestDelegate next)
+    {
+        if (_limiter == null || CarriesCredential(context.Request))
+        {
+            return next(context);
+        }
+
+        return AcquireAsync(context, next);
+    }
+
+    /// <summary>
+    /// Per-IP check after authentication, for unauthenticated requests not counted earlier.
+    /// </summary>
+    /// <param name="context">The current request.</param>
+    /// <param name="next">The rest of the pipeline.</param>
+    /// <returns>A task that completes when the request was forwarded or rejected with 429.</returns>
+    public Task InvokeAsync(
         HttpContext context,
         RequestDelegate next)
     {
-        if (_limiter == null)
+        if (_limiter == null ||
+            context.Items.ContainsKey(CountedKey) ||
+            context.User.Identity?.IsAuthenticated == true)
+        {
+            return next(context);
+        }
+
+        return AcquireAsync(context, next);
+    }
+
+    /// <summary>
+    /// Takes one permit for the client IP or answers 429.
+    /// </summary>
+    private async Task AcquireAsync(HttpContext context, RequestDelegate next)
+    {
+        if (context.GetEndpoint()?.Metadata.GetMetadata<DisableRateLimitingAttribute>() != null)
         {
             await next(context);
             return;
         }
-        if (context.User.Identity?.IsAuthenticated == true)
-        {
-            await next(context);
-            return;
-        }
-        var endpoint = context.GetEndpoint();
-        if (endpoint?.Metadata.GetMetadata<DisableRateLimitingAttribute>() != null)
-        {
-            await next(context);
-            return;
-        }
-        using RateLimitLease lease = _limiter.AttemptAcquire(context);
+
+        context.Items[CountedKey] = true;
+        using RateLimitLease lease = _limiter!.AttemptAcquire(context);
         if (lease.IsAcquired)
         {
             await next(context);
@@ -78,6 +128,22 @@ internal sealed class GatewayAnonymousRateLimitingMiddleware
             ? retryAfterValue
             : _window;
         await GatewayRateLimitResponse.WriteQuotaExceededAsync(context, retryAfter);
+    }
+
+    /// <summary>
+    /// Whether the request carries a credential header.
+    /// </summary>
+    private bool CarriesCredential(HttpRequest request)
+    {
+        foreach (var header in _credentialHeaders)
+        {
+            if (request.Headers.ContainsKey(header))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

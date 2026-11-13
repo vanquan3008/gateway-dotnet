@@ -16,4 +16,7 @@ public sealed class GatewayObservabilityOptions
 
     [Range(100, 30_000)]
     public int OtlpTimeoutMilliseconds { get; init; } = 1_000;
+
+    [Range(0d, 1d)]
+    public double TraceSamplingRatio { get; init; } = 1d;
 }

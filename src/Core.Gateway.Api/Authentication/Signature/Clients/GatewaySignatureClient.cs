@@ -17,12 +17,12 @@ internal sealed class GatewaySignatureClient
     private const string RoleClaim = "role";
 
     private readonly Claim[] _claims;
-    private readonly RSA[] _keys;
+    private readonly ThreadLocal<RSA[]> _keys;
 
-    private GatewaySignatureClient(Claim[] claims, RSA[] keys)
+    private GatewaySignatureClient(Claim[] claims, RSAParameters[] keys)
     {
         _claims = claims;
-        _keys = keys;
+        _keys = new ThreadLocal<RSA[]>(() => [.. keys.Select(RSA.Create)]);
     }
 
     /// <summary>
@@ -54,7 +54,7 @@ internal sealed class GatewaySignatureClient
     /// <returns>True when a key verifies the signature.</returns>
     public bool Verify(byte[] data, ReadOnlySpan<byte> signature, RSASignaturePadding padding)
     {
-        foreach (var key in _keys)
+        foreach (var key in _keys.Value!)
         {
             if (Verify(key, data, signature, padding))
             {
@@ -77,20 +77,17 @@ internal sealed class GatewaySignatureClient
             RoleClaim));
 
     /// <summary>
-    /// Verifies with one key. An RSA instance is not thread-safe, so concurrent requests take turns.
+    /// Verifies with one key; RSA is not thread-safe, so each thread has its own keys.
     /// </summary>
     private static bool Verify(RSA key, byte[] data, ReadOnlySpan<byte> signature, RSASignaturePadding padding)
     {
-        lock (key)
+        try
         {
-            try
-            {
-                return key.VerifyData(data, signature, HashAlgorithmName.SHA256, padding);
-            }
-            catch (CryptographicException)
-            {
-                return false;
-            }
+            return key.VerifyData(data, signature, HashAlgorithmName.SHA256, padding);
+        }
+        catch (CryptographicException)
+        {
+            return false;
         }
     }
 
@@ -126,10 +123,10 @@ internal sealed class GatewaySignatureClient
     }
 
     /// <summary>
-    /// Loads the public keys of a PEM file as RSA instances ready to verify signatures.
+    /// Loads the public keys of a PEM file as RSA parameters.
     /// </summary>
-    private static RSA[] LoadKeys(string publicKeyFile)
+    private static RSAParameters[] LoadKeys(string publicKeyFile)
         => [.. GatewayPublicKeyLoader.Load(publicKeyFile)
             .Cast<RsaSecurityKey>()
-            .Select(key => RSA.Create(key.Parameters))];
+            .Select(key => key.Parameters)];
 }

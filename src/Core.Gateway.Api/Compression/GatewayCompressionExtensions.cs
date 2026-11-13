@@ -5,16 +5,20 @@ namespace Core.Gateway.Api.Compression;
 
 public static class GatewayCompressionExtensions
 {
+    public const string EnableForHttpsKey = "Compression:EnableForHttps";
+
     /// <summary>
-    /// Adds response compression with Brotli and Gzip using the fastest compression level for high proxy throughput.
+    /// Adds Brotli and Gzip at the fastest level; HTTPS only when Compression:EnableForHttps is true.
     /// </summary>
     /// <param name="services">The service collection.</param>
+    /// <param name="configuration">The application configuration.</param>
     /// <returns>The same service collection.</returns>
-    public static IServiceCollection AddGatewayResponseCompression(this IServiceCollection services)
+    public static IServiceCollection AddGatewayResponseCompression(this IServiceCollection services, IConfiguration configuration)
     {
+        var enableForHttps = configuration.GetValue<bool>(EnableForHttpsKey);
         services.AddResponseCompression(options =>
         {
-            options.EnableForHttps = true;
+            options.EnableForHttps = enableForHttps;
             options.Providers.Add<BrotliCompressionProvider>();
             options.Providers.Add<GzipCompressionProvider>();
             options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(

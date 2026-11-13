@@ -2,6 +2,7 @@ using System.Diagnostics.Metrics;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Core.Gateway.Api.Configuration;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Core.Gateway.Api.Security.Waf;
@@ -23,7 +24,7 @@ public sealed partial class GatewaySanitizationMiddleware(
         unit: "{request}",
         description: "Number of suspicious requests blocked by gateway sanitization.");
 
-    [GeneratedRegex(@"(?:\.\.[\\/]|%2e%2e[\\/]|%2e%2e%2f|%2e%2e%5c)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\.\.[\\/]", RegexOptions.CultureInvariant)]
     private static partial Regex PathTraversalPattern();
 
     [GeneratedRegex(@"(?:<\s*script|javascript\s*:|vbscript\s*:|<\s*iframe)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -32,43 +33,51 @@ public sealed partial class GatewaySanitizationMiddleware(
     [GeneratedRegex(@"(?:union\s+(?:all\s+)?select|;\s*drop\s+table|waitfor\s+delay|'\s+or\s+(?:'?[0-9]+'?=[0-9]+|true))", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SqlInjectionPattern();
 
-    public async Task InvokeAsync(HttpContext context)
+    /// <summary>
+    /// Blocks null bytes and path traversal; XSS and SQL unless the route sets InjectionFilter to false.
+    /// </summary>
+    /// <param name="context">The current request.</param>
+    /// <returns>A task that completes when the request was forwarded or blocked.</returns>
+    public Task InvokeAsync(HttpContext context)
     {
         var request = context.Request;
-        var path = request.Path.Value ?? string.Empty;
-        var query = request.QueryString.Value ?? string.Empty;
-        var decodedQuery = Decode(query);
+        var path = Decode(request.Path.Value ?? string.Empty, plusIsSpace: false);
+        var query = Decode(request.QueryString.Value ?? string.Empty, plusIsSpace: true);
 
-        if (ContainsNullByte(path) || ContainsNullByte(query))
+        if (path.Contains('\0') || query.Contains('\0'))
         {
-            await BlockAsync(context, "NullByteInjection", "Null byte character detected in request URL.");
-            return;
+            return BlockAsync(context, "NullByteInjection", "Null byte character detected in request URL.");
         }
 
-        if (PathTraversalPattern().IsMatch(path) || PathTraversalPattern().IsMatch(decodedQuery))
+        if (PathTraversalPattern().IsMatch(path) || PathTraversalPattern().IsMatch(query))
         {
-            await BlockAsync(context, "PathTraversal", "Path traversal pattern detected in request.");
-            return;
+            return BlockAsync(context, "PathTraversal", "Path traversal pattern detected in request.");
         }
 
-        if (ScriptInjectionPattern().IsMatch(path) || ScriptInjectionPattern().IsMatch(decodedQuery))
+        if (!InjectionFilterEnabled(context))
         {
-            await BlockAsync(context, "CrossSiteScripting", "Cross-site scripting pattern detected in request.");
-            return;
+            return next(context);
         }
 
-        if (SqlInjectionPattern().IsMatch(query) || SqlInjectionPattern().IsMatch(decodedQuery))
+        if (ScriptInjectionPattern().IsMatch(path) || ScriptInjectionPattern().IsMatch(query))
         {
-            await BlockAsync(context, "SqlInjection", "SQL injection signature detected in request query.");
-            return;
+            return BlockAsync(context, "CrossSiteScripting", "Cross-site scripting pattern detected in request.");
         }
 
-        await next(context);
+        if (SqlInjectionPattern().IsMatch(query))
+        {
+            return BlockAsync(context, "SqlInjection", "SQL injection signature detected in request query.");
+        }
+
+        return next(context);
     }
 
-    private static string Decode(string text)
+    /// <summary>
+    /// Percent-decodes up to two passes to catch double encoding.
+    /// </summary>
+    private static string Decode(string text, bool plusIsSpace)
     {
-        var decoded = text.Replace('+', ' ');
+        var decoded = plusIsSpace ? text.Replace('+', ' ') : text;
         for (var pass = 0; pass < MaxDecodePasses && decoded.Contains('%'); pass++)
         {
             decoded = Uri.UnescapeDataString(decoded);
@@ -77,8 +86,13 @@ public sealed partial class GatewaySanitizationMiddleware(
         return decoded;
     }
 
-    private static bool ContainsNullByte(string text) =>
-        text.Contains('\0') || text.Contains("%00", StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// Whether the matched route keeps the injection filter on.
+    /// </summary>
+    private static bool InjectionFilterEnabled(HttpContext context) =>
+        context.GetRouteMetadata(GatewayRouteMetadata.InjectionFilter) is not { } value ||
+        !bool.TryParse(value, out var enabled) ||
+        enabled;
 
     private async Task BlockAsync(HttpContext context, string category, string detail)
     {
