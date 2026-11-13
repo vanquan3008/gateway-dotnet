@@ -94,6 +94,27 @@ public sealed partial class GatewayPipelineTests
         Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
     }
 
+    [Fact]
+    public async Task AnonymousFlood_DoesNotDrainTheClusterLimitForCredentialedCallers()
+    {
+        await using var host = await GatewayTestHost.StartAsync(ApiKeySettings(new()
+        {
+            ["RateLimiting:Local:Anonymous:PermitLimit"] = "1",
+            ["RateLimiting:Local:Anonymous:WindowSeconds"] = "60",
+            ["RateLimiting:Local:Service:PermitLimit"] = "3",
+            ["RateLimiting:Local:Service:WindowSeconds"] = "60"
+        }));
+
+        for (var request = 0; request < 10; request++)
+        {
+            using var anonymous = await host.Client.GetAsync("/api/users");
+            Assert.Equal(request == 0 ? HttpStatusCode.Unauthorized : HttpStatusCode.TooManyRequests, anonymous.StatusCode);
+        }
+
+        using var keyed = await host.Client.SendAsync(ApiKeyRequest("/api/users", BillingKey));
+        Assert.Equal(HttpStatusCode.OK, keyed.StatusCode);
+    }
+
     [Theory]
     [InlineData("X-Api-Key", "not-a-registered-key")]
     [InlineData("Authorization", "Bearer not-a-token")]

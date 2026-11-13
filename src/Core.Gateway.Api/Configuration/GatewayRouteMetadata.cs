@@ -9,6 +9,7 @@ public static class GatewayRouteMetadata
     public const string RetryAttempts = "RetryAttempts";
     public const string MaxRequestBodySize = "MaxRequestBodySize";
     public const string Streaming = "Streaming";
+    public const string InjectionFilter = "InjectionFilter";
     public const int MaxRetryAttempts = 3;
     public const long MaxRequestBodySizeLimit = 1_073_741_824;
 

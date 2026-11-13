@@ -50,6 +50,33 @@ public sealed class GatewayRouteMetadataConfigFilterTests
             async () => await _filter.ConfigureRouteAsync(Route(streaming: "yes"), null, CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("true")]
+    [InlineData("false")]
+    public async Task InjectionFilterFlag_AcceptsABoolean(string value)
+    {
+        var route = Route(streaming: "false") with
+        {
+            Metadata = new Dictionary<string, string> { [GatewayRouteMetadata.InjectionFilter] = value }
+        };
+
+        Assert.Same(route, await _filter.ConfigureRouteAsync(route, null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task InjectionFilterFlag_MustBeABoolean()
+    {
+        var route = Route(streaming: "false") with
+        {
+            Metadata = new Dictionary<string, string> { [GatewayRouteMetadata.InjectionFilter] = "off" }
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await _filter.ConfigureRouteAsync(route, null, CancellationToken.None));
+
+        Assert.Contains(GatewayRouteMetadata.InjectionFilter, exception.Message);
+    }
+
     private static RouteConfig Route(string streaming, string? timeoutPolicy = null) => new()
     {
         RouteId = "events",

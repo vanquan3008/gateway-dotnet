@@ -27,23 +27,25 @@ public static class GatewayPipelineExtensions
         app.UseMiddleware<CorrelationIdMiddleware>();
         app.UseGatewayErrorHandling();
         app.UseResponseCompression();
-        if (app.Environment.IsProduction())
+        if (!app.Environment.IsDevelopment())
         {
             app.UseHsts();
         }
 
         app.UseHostFiltering();
         app.UseMiddleware<SecurityHeadersMiddleware>();
-        app.UseMiddleware<GatewaySanitizationMiddleware>();
         app.UseMiddleware<RequestLoggingMiddleware>();
 
         app.UseRouting();
+        app.UseMiddleware<GatewaySanitizationMiddleware>();
         app.UseGatewayManagementPort();
         app.UseGatewayRequestLimits();
         app.UseRequestTimeouts();
         app.UseMiddleware<GatewayForwarderErrorMiddleware>();
         app.UseCors(GatewayCorsExtensions.PolicyName);
 
+        var anonymousLimiter = app.Services.GetRequiredService<GatewayAnonymousRateLimitingMiddleware>();
+        app.Use((context, next) => anonymousLimiter.InvokeBeforeAuthenticationAsync(context, next));
         app.UseMiddleware<GatewayConcurrencyLimiterMiddleware>();
         app.UseRateLimiter();
 

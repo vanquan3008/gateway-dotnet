@@ -29,7 +29,7 @@ public static class GatewayServiceCollectionExtensions
 
         builder.Services
             .AddGatewayErrorHandling()
-            .AddGatewayResponseCompression()
+            .AddGatewayResponseCompression(configuration)
             .AddGatewayObservability(configuration)
             .AddGatewayHealthChecks();
 

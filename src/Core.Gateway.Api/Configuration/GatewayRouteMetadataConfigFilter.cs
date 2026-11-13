@@ -59,6 +59,12 @@ public sealed class GatewayRouteMetadataConfigFilter(
             throw Invalid(route, $"{GatewayRouteMetadata.MaxRequestBodySize} must be 1-{GatewayRouteMetadata.MaxRequestBodySizeLimit} bytes");
         }
 
+        if (metadata.TryGetValue(GatewayRouteMetadata.InjectionFilter, out var injectionFilter) &&
+            !bool.TryParse(injectionFilter, out _))
+        {
+            throw Invalid(route, $"{GatewayRouteMetadata.InjectionFilter} must be 'true' or 'false'");
+        }
+
         if (metadata.TryGetValue(GatewayRouteMetadata.Streaming, out var streaming))
         {
             if (!bool.TryParse(streaming, out var isStreaming))
